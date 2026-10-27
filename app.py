@@ -17,8 +17,42 @@ app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 def index():
     return FileResponse(ROOT / 'static/index.html')
 
+def refine_alpha(mask, rgb, cleanup):
+    """Remove isolated dust and use image edges to refine the selection boundary."""
+    binary = np.where((mask == 1) | (mask == 3), 255, 0).astype('uint8')
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    protected = set(np.unique(labels[mask == cv2.GC_FGD]))
+    threshold = max(4, binary.size * 0.00008)
+    for label in range(1, count):
+        if stats[label, cv2.CC_STAT_AREA] < threshold and label not in protected:
+            binary[labels == label] = 0
+    # A conservative inward trim removes old background fringes. Zero keeps fine details.
+    if cleanup:
+        binary = cv2.erode(binary, np.ones((3, 3), np.uint8), iterations=cleanup)
+    guide = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255
+    source = binary.astype(np.float32) / 255
+    mean = lambda v: cv2.boxFilter(v, -1, (5, 5), borderType=cv2.BORDER_REFLECT)
+    mu_i, mu_p = mean(guide), mean(source)
+    a = (mean(guide * source) - mu_i * mu_p) / (mean(guide * guide) - mu_i * mu_i + 0.001)
+    b = mu_p - a * mu_i
+    alpha = np.clip((mean(a) * guide + mean(b) - 0.05) / 0.90, 0, 1)
+    # Manual brush instructions override automatic edge cleanup.
+    alpha[mask == cv2.GC_FGD] = 1
+    alpha[mask == cv2.GC_BGD] = 0
+    return Image.fromarray(np.rint(alpha * 255).astype('uint8'))
+
+
+def brighten_product(image, brightness):
+    """Lift midtones with a gamma curve; leave black and white endpoints intact."""
+    if brightness == 0:
+        return image
+    gamma = 1 / (1 + brightness / 100)
+    lut = [round(255 * (v / 255) ** gamma) for v in range(256)]
+    return image.point(lut * 3)
+
+
 @app.post('/api/process')
-async def process(file: UploadFile = File(...), selection: str = Form(...), strokes: str = Form('[]'), shadow: int = Form(28)):
+async def process(file: UploadFile = File(...), selection: str = Form(...), strokes: str = Form('[]'), shadow: int = Form(28), brightness: int = Form(15, ge=0, le=50), cleanup: int = Form(1, ge=0, le=3)):
     data = await file.read(21 * 1024 * 1024)
     if len(data) > 20 * 1024 * 1024:
         raise HTTPException(413, '20MB 이하의 사진을 올려 주세요.')
@@ -56,10 +90,10 @@ async def process(file: UploadFile = File(...), selection: str = Form(...), stro
                 cv2.circle(mask, p, radius, color, -1)
             for p, q in zip(pts, pts[1:]):
                 cv2.line(mask, p, q, color, radius * 2)
-        cv2.grabCut(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), mask, None, np.zeros((1,65),np.float64), np.zeros((1,65),np.float64), 5, cv2.GC_INIT_WITH_MASK)
+        cv2.grabCut(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), mask, None, np.zeros((1,65),np.float64), np.zeros((1,65),np.float64), 8, cv2.GC_INIT_WITH_MASK)
     except (cv2.error, KeyError, TypeError, ValueError, OverflowError):
         raise HTTPException(400, '제품 영역을 다시 선택해 주세요. 배경이 테두리에 포함되어야 합니다.')
-    alpha = Image.fromarray(np.where((mask == 1) | (mask == 3), 255, 0).astype('uint8')).resize((w,h),Image.Resampling.LANCZOS)
+    alpha = refine_alpha(mask, rgb, cleanup).resize((w,h), Image.Resampling.LANCZOS)
     if not alpha.getbbox():
         raise HTTPException(422, '제품을 찾지 못했습니다. 포함 브러시로 제품 안쪽을 표시해 주세요.')
     output = Image.new('RGBA', (w,h), 'white')
@@ -69,7 +103,7 @@ async def process(file: UploadFile = File(...), selection: str = Form(...), stro
         shade = alpha.filter(ImageFilter.GaussianBlur(max(w,h)*0.012)).point(lambda a: round(a*strength/100))
         layer.paste((0,0,0), (0,0,w,h), shade)
         output.alpha_composite(layer, (0,round(h*0.008)))
-    product = image.convert('RGBA')
+    product = brighten_product(image, brightness).convert('RGBA')
     product.putalpha(alpha)
     output.alpha_composite(product)
     buf = io.BytesIO()

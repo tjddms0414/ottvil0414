@@ -62,19 +62,24 @@ canvas.onpointermove=e=>{if(!drawing)return;const p=point(e);if(mode==='rect')se
 function finish(){if(!drawing)return;drawing=false;current=null;$('#process').disabled=!selection||selection.w<.01||selection.h<.01;status($('#process').disabled?'제품 영역을 조금 더 크게 선택해 주세요.':'제품이 선택됐어요. 브러시로 보정하거나 화이트 배경을 만들어 보세요.');}
 canvas.onpointerup=finish;canvas.onpointercancel=finish;
 $('#undo').onclick=()=>{if(busy)return;invalidate();if(strokes.length)strokes.pop();else selection=null;$('#process').disabled=!selection;render();status('마지막 지정을 취소했어요.');};
-$('#shadow').oninput=e=>{$('#shadow-value').textContent=e.target.value+'%';if(resultURL){invalidate();status('그림자 설정이 바뀌었어요. 배경 만들기를 다시 눌러 주세요.');}};
+for (const id of ['shadow', 'brightness', 'cleanup']) {
+ $('#'+id).oninput=e=>{
+  $('#'+id+'-value').textContent=id==='cleanup'?['없음','기본','강하게','최대'][Number(e.target.value)]:(id==='brightness'?'+':'')+e.target.value+'%';
+  if(resultURL){invalidate();status('설정이 바뀌었어요. 배경 만들기를 다시 눌러 적용하세요.');}
+ };
+}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 $('#process').onclick=async()=>{
  if(!upload||!selection||busy)return;
- busy=true;$('#loading').hidden=false;$('#process').disabled=true;$('#shadow').disabled=true;$('#undo').disabled=true;
+ busy=true;$('#loading').hidden=false;$('#process').disabled=true;['shadow','brightness','cleanup'].forEach(id=>$('#'+id).disabled=true);$('#undo').disabled=true;
  status('배경을 분리하고 있어요. 잠시만 기다려 주세요.');
- const data=new FormData();data.append('file',upload);data.append('selection',JSON.stringify(selection));data.append('strokes',JSON.stringify(strokes));data.append('shadow',$('#shadow').value);
+ const data=new FormData();data.append('file',upload);data.append('selection',JSON.stringify(selection));data.append('strokes',JSON.stringify(strokes));data.append('shadow',$('#shadow').value);data.append('brightness',$('#brightness').value);data.append('cleanup',$('#cleanup').value);
  try{
   const response=await fetch('/api/process',{method:'POST',body:data});
   if(!response.ok){let message='처리하지 못했습니다. 다시 시도해 주세요.';try{const err=await response.json();if(typeof err.detail==='string')message=err.detail;}catch{}throw new Error(message);}
   invalidate();resultURL=URL.createObjectURL(await response.blob());$('#result').src=resultURL;$('[data-tab=result]').disabled=false;$('#download').disabled=false;setTab('result');$('#step3').classList.add('active');status('완성됐어요. 가장자리를 확인하고 PNG로 저장하세요.');
  }catch(error){status(error.message||'서버 연결을 확인해 주세요.');}
- finally{busy=false;$('#loading').hidden=true;$('#process').disabled=false;$('#shadow').disabled=false;$('#undo').disabled=false;}
+ finally{busy=false;$('#loading').hidden=true;$('#process').disabled=false;['shadow','brightness','cleanup'].forEach(id=>$('#'+id).disabled=false);$('#undo').disabled=false;}
 };
 $('#download').onclick=()=>{if(!resultURL)return;const a=document.createElement('a');a.href=resultURL;a.download=(upload.name.replace(/\.[^.]+$/,'')||'product')+'-white-studio.png';a.click();};
 $('#help').onclick=()=>$('#guide').showModal();$('#close-guide').onclick=()=>$('#guide').close();
